@@ -11,16 +11,21 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4  # Updated to v4 to fix Node.js warnings
 
       - name: Setup Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5  # Updated to v5 to fix Node.js warnings
         with:
-          python-version: '3.11'
+          python-version: '3.11'  # Added quotes to prevent YAML float parsing errors
 
       - name: Install dependencies
         run: |
-          pip install feedparser newspaper3k transformers torch lxml_html_clean
+          # Added scikit-learn to prevent ModuleNotFoundError
+          pip install feedparser newspaper3k transformers torch lxml_html_clean scikit-learn
 
       - name: Run script
+        env:
+          # Passes your GitHub Secrets into the Python environment
+          EMAIL_USER: ${{ secrets.EMAIL_USER }}
+          EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
         run: python main.py
