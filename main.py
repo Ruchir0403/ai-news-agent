@@ -1,6 +1,6 @@
-# ================================
+# =========================================
 # AI NEWS AGENT - PRODUCTION VERSION
-# ================================
+# =========================================
 
 import os
 import feedparser
@@ -10,26 +10,27 @@ from datetime import datetime
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+
+# DEDUPLICATION
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
-# ================================
-# LOAD MODELS
-# ================================
+# =========================================
+# LOAD AI MODEL
+# =========================================
+
+print("Loading AI model...")
 
 classifier = pipeline(
     "zero-shot-classification",
     model="facebook/bart-large-mnli"
 )
 
-# NOTE: keeping your summarizer unused since you're doing headline-only briefing
-# (you can remove it entirely safely)
+print("✅ AI Model Loaded")
 
-print("Models Loaded")
-
-# ================================
+# =========================================
 # RSS FEEDS
-# ================================
+# =========================================
 
 rss_feeds = [
     "https://feeds.bbci.co.uk/news/rss.xml",
@@ -39,87 +40,104 @@ rss_feeds = [
     "https://timesofindia.indiatimes.com/rssfeeds/-2128936835.cms"
 ]
 
-# ================================
-# COLLECT LINKS
-# ================================
+# =========================================
+# FETCH ARTICLE LINKS
+# =========================================
 
 article_links = []
 
 for feed_url in rss_feeds:
-    feed = feedparser.parse(feed_url)
 
-    for entry in feed.entries[:10]:
-        if entry.link not in article_links:
-            article_links.append(entry.link)
+    try:
+        feed = feedparser.parse(feed_url)
 
-print("Articles fetched:", len(article_links))
+        for entry in feed.entries[:10]:
 
-# ================================
+            if entry.link not in article_links:
+                article_links.append(entry.link)
+
+    except Exception as e:
+        print(f"RSS Error: {e}")
+
+print(f"📰 Total article links fetched: {len(article_links)}")
+
+# =========================================
 # SCRAPE ARTICLES
-# ================================
+# =========================================
 
 news_articles = []
 
-ignore_words = ["advertisement", "sponsored", "watch live", "video", "photos"]
+ignore_words = [
+    "advertisement",
+    "sponsored",
+    "watch live",
+    "video",
+    "photos"
+]
 
 for link in article_links:
 
     try:
         article = Article(link)
+
         article.download()
         article.parse()
 
-        title = article.title or ""
-        text = article.text or ""
+        title = article.title.strip() if article.title else ""
+        text = article.text.strip() if article.text else ""
 
+        # Skip short/low-quality articles
         if len(text) < 500:
             continue
 
+        # Ignore unwanted content
         if any(word in title.lower() for word in ignore_words):
             continue
 
         news_articles.append({
-            "title": title.strip(),
+            "title": title,
             "link": link
         })
 
-    except:
-        continue
+    except Exception:
+        print(f"❌ Failed to scrape: {link}")
 
-print("Clean articles:", len(news_articles))
+print(f"✅ Clean articles collected: {len(news_articles)}")
 
-# ================================
-# DEDUPLICATION
-# ================================
+# =========================================
+# REMOVE DUPLICATE ARTICLES
+# =========================================
 
 if len(news_articles) > 1:
 
-    titles = [a["title"] for a in news_articles]
+    titles = [article["title"] for article in news_articles]
 
     vectorizer = TfidfVectorizer().fit_transform(titles)
-    similarity = cosine_similarity(vectorizer)
 
-    used = set()
+    similarity_matrix = cosine_similarity(vectorizer)
+
+    used_indexes = set()
     unique_articles = []
 
     for i in range(len(news_articles)):
 
-        if i in used:
+        if i in used_indexes:
             continue
 
         unique_articles.append(news_articles[i])
 
         for j in range(i + 1, len(news_articles)):
-            if similarity[i][j] > 0.6:
-                used.add(j)
+
+            if similarity_matrix[i][j] > 0.60:
+                used_indexes.add(j)
 
     news_articles = unique_articles
 
-print("After dedupe:", len(news_articles))
+print(f"🧹 Articles after deduplication: {len(news_articles)}")
 
-# ================================
+# =========================================
 # CATEGORY BUCKETS
-# ================================
+# =========================================
 
 categorized = {
     "🌍 GLOBAL NEWS": [],
@@ -129,64 +147,81 @@ categorized = {
     "📌 OTHER": []
 }
 
-global_keywords = [
-    "war", "ukraine", "russia", "china", "israel",
-    "gaza", "nato", "iran", "un", "world", "global",
-    "military", "attack", "conflict"
-]
-
-# ================================
-# CLASSIFICATION
-# ================================
+# =========================================
+# CLASSIFICATION LABELS
+# =========================================
 
 labels = [
-    "Global News",
+    "World News",
     "Business & Economy",
     "Technology & AI",
-    "India"
+    "India",
+    "Politics",
+    "Science",
+    "Sports"
 ]
+
+# =========================================
+# AI CLASSIFICATION
+# =========================================
+
+print("🤖 Classifying articles...")
 
 for article in news_articles:
 
     title = article["title"]
-    low = title.lower()
-
-    assigned = False
-
-    # FORCE GLOBAL
-    if any(k in low for k in global_keywords):
-        categorized["🌍 GLOBAL NEWS"].append(article)
-        continue
 
     try:
-        result = classifier(title, labels)
-        category = result["labels"][0]
 
-    except:
-        category = "Other"
+        result = classifier(
+            title,
+            labels,
+            multi_label=False
+        )
 
-    if category == "Business & Economy":
+        predicted_category = result["labels"][0]
+        confidence_score = result["scores"][0]
+
+    except Exception:
+
+        predicted_category = "Other"
+        confidence_score = 0
+
+    # Low confidence fallback
+    if confidence_score < 0.40:
+        categorized["📌 OTHER"].append(article)
+        continue
+
+    # Category Mapping
+    if predicted_category == "Business & Economy":
+
         categorized["💼 BUSINESS & ECONOMY"].append(article)
 
-    elif category == "Technology & AI":
+    elif predicted_category == "Technology & AI":
+
         categorized["🤖 TECHNOLOGY & AI"].append(article)
 
-    elif category == "India":
-        categorized["🇮🇳 INDIA"].append(article)
+    elif predicted_category in ["World News", "Politics"]:
 
-    elif category == "Global News":
         categorized["🌍 GLOBAL NEWS"].append(article)
 
+    elif predicted_category == "India":
+
+        categorized["🇮🇳 INDIA"].append(article)
+
     else:
+
         categorized["📌 OTHER"].append(article)
 
-# ================================
-# BUILD EMAIL CONTENT
-# ================================
+print("✅ Classification completed")
+
+# =========================================
+# BUILD NEWS SUMMARY
+# =========================================
 
 daily_summary = ""
 
-order = [
+category_order = [
     "🌍 GLOBAL NEWS",
     "💼 BUSINESS & ECONOMY",
     "🤖 TECHNOLOGY & AI",
@@ -194,21 +229,27 @@ order = [
     "📌 OTHER"
 ]
 
-for cat in order:
+for category in category_order:
 
-    if len(categorized[cat]) == 0:
+    articles = categorized[category]
+
+    if len(articles) == 0:
         continue
 
-    daily_summary += f"\n{cat}\n\n"
+    daily_summary += f"\n{category}\n\n"
 
-    for article in categorized[cat][:6]:
-        daily_summary += f"• {article['title']}\n  {article['link']}\n\n"
+    for article in articles[:6]:
 
-print("Summary ready")
+        daily_summary += (
+            f"• {article['title']}\n"
+            f"  {article['link']}\n\n"
+        )
 
-# ================================
-# EMAIL CONFIG (ENV VARIABLES)
-# ================================
+print("✅ Summary generated")
+
+# =========================================
+# EMAIL CONFIGURATION
+# =========================================
 
 sender_email = os.getenv("EMAIL_USER")
 password = os.getenv("EMAIL_PASS")
@@ -216,30 +257,85 @@ password = os.getenv("EMAIL_PASS")
 receiver_email = sender_email
 
 if not sender_email or not password:
-    raise ValueError("Missing EMAIL_USER or EMAIL_PASS in environment variables")
 
-# ================================
+    raise ValueError(
+        "❌ Missing EMAIL_USER or EMAIL_PASS environment variables"
+    )
+
+# =========================================
 # CREATE EMAIL
-# ================================
+# =========================================
+
+today = datetime.now().strftime("%d %B %Y")
 
 message = MIMEMultipart("alternative")
-message["Subject"] = "📰 Daily AI News Briefing"
+
+message["Subject"] = f"📰 Daily AI News Briefing | {today}"
 message["From"] = sender_email
 message["To"] = receiver_email
 
+# =========================================
+# STYLED HTML EMAIL TEMPLATE
+# =========================================
+
 html = f"""
 <html>
-<body style="font-family: Arial; padding: 20px;">
 
-<h2>📰 Daily AI News Briefing</h2>
+<body style="
+    margin: 0;
+    padding: 30px;
+    background-color: #f4f6f8;
+    font-family: 'Segoe UI', Helvetica, sans-serif;
+">
 
-<pre style="white-space: pre-wrap; font-size: 14px;">
+<div style="
+    max-width: 900px;
+    margin: auto;
+    background-color: white;
+    border-radius: 14px;
+    padding: 35px;
+    box-shadow: 0 4px 14px rgba(0,0,0,0.08);
+">
+
+<h1 style="
+    margin-top: 0;
+    color: #111827;
+    font-size: 32px;
+">
+📰 Daily AI News Briefing
+</h1>
+
+<p style="
+    color: #6b7280;
+    font-size: 14px;
+    margin-bottom: 25px;
+">
+{today}
+</p>
+
+<pre style="
+    white-space: pre-wrap;
+    font-size: 15px;
+    line-height: 1.8;
+    font-family: 'Segoe UI', Helvetica, sans-serif;
+    color: #1f2937;
+    background-color: #fafafa;
+    border: 1px solid #e5e7eb;
+    border-radius: 12px;
+    padding: 25px;
+">
 {daily_summary}
 </pre>
 
-<p style="color: gray; font-size: 12px;">
+<p style="
+    margin-top: 25px;
+    font-size: 12px;
+    color: gray;
+">
 Generated automatically by AI News Agent
 </p>
+
+</div>
 
 </body>
 </html>
@@ -247,19 +343,31 @@ Generated automatically by AI News Agent
 
 message.attach(MIMEText(html, "html"))
 
-# ================================
+# =========================================
 # SEND EMAIL
-# ================================
+# =========================================
 
 try:
+
+    print("📨 Sending email...")
+
     server = smtplib.SMTP("smtp.gmail.com", 587)
+
     server.starttls()
+
     server.login(sender_email, password)
 
-    server.sendmail(sender_email, receiver_email, message.as_string())
+    server.sendmail(
+        sender_email,
+        receiver_email,
+        message.as_string()
+    )
+
     server.quit()
 
-    print("Email sent successfully!")
+    print("✅ Email sent successfully!")
 
 except Exception as e:
-    print("Email failed:", e)
+
+    print("❌ Email failed")
+    print(e)
